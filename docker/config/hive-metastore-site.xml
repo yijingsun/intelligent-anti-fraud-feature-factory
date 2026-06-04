@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  Hive 配置 — Metastore 专用（不含 uris，避免循环连接自身）
+  元数据：PostgreSQL / 数据文件：MinIO S3A
+-->
+<configuration>
+
+    <!-- =========================================================
+         Metastore 元数据库连接 (PostgreSQL)
+         ========================================================= -->
+    <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://postgres:5432/hive_metastore</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>hivepass123</value>
+    </property>
+
+    <!-- =========================================================
+         Warehouse 路径 — MinIO S3A bucket
+         ========================================================= -->
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>/tmp/hive-warehouse</value>
+        <description>Metastore 本地 warehouse（不访问 S3A）。客户端用 hive-site.xml 中的 S3A 路径。</description>
+    </property>
+
+    <!-- =========================================================
+         Metastore 服务配置（不设置 uris — 自身作为服务端运行）
+         ========================================================= -->
+    <property>
+        <name>hive.metastore.event.db.notification.api.auth</name>
+        <value>false</value>
+    </property>
+    <property>
+        <name>hive.metastore.schema.verification</name>
+        <value>false</value>
+    </property>
+
+    <!-- =========================================================
+         DataNucleus 自动 schema 创建（开发环境兜底）
+         当 schematool 不可用时，metastore 启动时自动建表
+         ========================================================= -->
+    <property>
+        <name>datanucleus.schema.autoCreateAll</name>
+        <value>true</value>
+        <description>自动创建所有缺失的 schema 对象</description>
+    </property>
+    <property>
+        <name>datanucleus.schema.autoCreateTables</name>
+        <value>true</value>
+        <description>自动创建缺失的表</description>
+    </property>
+
+</configuration>

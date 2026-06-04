@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  Hadoop core-site.xml — S3A 指向 MinIO
+  此文件同时被 Hive 和 Spark 使用
+-->
+<configuration>
+
+    <!-- =========================================================
+         MinIO S3A 连接配置（替代 HDFS）
+         ========================================================= -->
+    <property>
+        <name>fs.s3a.endpoint</name>
+        <value>http://minio:9000</value>
+        <description>MinIO API 端点</description>
+    </property>
+    <property>
+        <name>fs.s3a.access.key</name>
+        <value>minioadmin</value>
+    </property>
+    <property>
+        <name>fs.s3a.secret.key</name>
+        <value>minioadmin123</value>
+    </property>
+    <property>
+        <name>fs.s3a.path.style.access</name>
+        <value>true</value>
+        <description>MinIO 需要 path-style 访问模式</description>
+    </property>
+    <property>
+        <name>fs.s3a.impl</name>
+        <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+    </property>
+    <property>
+        <name>fs.s3a.connection.ssl.enabled</name>
+        <value>false</value>
+        <description>内网环境不需要 TLS</description>
+    </property>
+
+    <!-- =========================================================
+         连接池与性能优化（低配环境保守值）
+         ========================================================= -->
+    <property>
+        <name>fs.s3a.connection.maximum</name>
+        <value>10</value>
+    </property>
+    <property>
+        <name>fs.s3a.threads.max</name>
+        <value>10</value>
+    </property>
+    <property>
+        <name>fs.s3a.fast.upload</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>fs.s3a.fast.upload.buffer</name>
+        <value>disk</value>
+    </property>
+
+    <!-- =========================================================
+         默认文件系统 (本地回退)
+         ========================================================= -->
+    <property>
+        <name>fs.defaultFS</name>
+        <value>file:///</value>
+    </property>
+
+</configuration>

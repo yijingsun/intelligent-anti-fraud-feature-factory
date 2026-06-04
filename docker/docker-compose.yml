@@ -1,0 +1,283 @@
+# ============================================================
+# 反欺诈特征工厂 — 基础设施 docker-compose
+# 约束：4C / 4G RAM Lighthouse 轻量云
+#
+# 启动链：
+#   postgres ──┐
+#              ├──→ hive-metastore ──→ hive-server2
+#   minio ──┐  │         │
+#           ├──┘         └──→ spark-master ──→ spark-worker
+#   minio-init (一次性，创建 MinIO bucket)
+#
+# JAR 策略：所有 jar 预先下载到 ./jars/ 目录，通过 bind mount 注入
+# Schema 策略：metastore 启动时通过 DataNucleus autoCreateAll 自动建表
+# 认证策略：PostgreSQL 使用 md5 认证
+#
+# 首次启动前需要下载依赖 jar：
+#   mkdir -p jars && cd jars
+#   curl -O https://repo1.maven.org/maven2/org/postgresql/postgresql/42.6.0/postgresql-42.6.0.jar
+#   curl -O https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar
+#   curl -O https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
+#
+# 启动：docker compose --env-file .env up -d
+# 停止：docker compose down -v
+# ============================================================
+services:
+
+  # ==========================================================
+  # PostgreSQL 14 — Hive Metastore 元数据库
+  # 存储 Hive 所有表结构、分区、列等元数据信息
+  # 认证方式降级为 md5，兼容 apache/hive 镜像自带的旧版 JDBC 驱动
+  # ==========================================================
+  postgres:
+    image: postgres:14-alpine
+    container_name: ff-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivepass123}
+      POSTGRES_DB: hive_metastore
+      # 降级为 md5 认证 — JDBC 42.x 之前的老驱动不支持 scram-sha-256
+      POSTGRES_HOST_AUTH_METHOD: md5
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-hive-db.sql:/docker-entrypoint-initdb.d/init-hive-db.sql:ro
+    mem_limit: 200m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-hive} -d hive_metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - ff-net
+
+  # ==========================================================
+  # MinIO — 统一对象存储，替代 HDFS
+  # Hive warehouse 数据文件和 Spark 中间数据均通过 S3A 协议存在此
+  # Console: http://<host>:9001（minioadmin / minioadmin123）
+  # ==========================================================
+  minio:
+    image: minio/minio:latest
+    container_name: ff-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - ff-net
+
+  # ==========================================================
+  # MinIO bucket 初始化（一次性容器）
+  # 创建 hive-warehouse bucket — Hive 托管表数据的 S3A 存储目标
+  # 执行完自动退出，不占用常驻资源
+  # ==========================================================
+  minio-init:
+    image: minio/mc:latest
+    container_name: ff-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+      /usr/bin/mc mb --ignore-existing local/hive-warehouse;
+      echo '[OK] MinIO bucket hive-warehouse ready';
+      exit 0;
+      "
+    networks:
+      - ff-net
+
+  # ==========================================================
+  # Hive Metastore — Thrift 元数据服务（端口 9083）
+  # 启动时通过 DataNucleus autoCreateAll 自动建表，无需手动 schematool
+  # 使用独立的 hive-metastore-site.xml（不含 uris，避免循环连接自身）
+  # JDBC 驱动通过 bind mount ./jars/ 注入，无需容器内下载
+  # ==========================================================
+  hive-metastore:
+    image: apache/hive:${HIVE_VERSION:-3.1.3}
+    container_name: ff-hive-metastore
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "9083:9083"
+    volumes:
+      - ./config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./config/hive-metastore-site.xml:/opt/hive/conf/hive-site.xml:ro
+      - ./init/hive-metastore-entrypoint.sh:/entrypoint.sh:ro
+      - ./jars/postgresql-42.6.0.jar:/opt/hive/lib/postgresql-42.6.0.jar:ro
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    environment:
+      # 直接使用 HADOOP_OPTS — hive 脚本会读取它（绕过 entrypoint.sh）
+      HADOOP_OPTS: >-
+        -Xmx256m -Xms128m
+        -XX:MaxMetaspaceSize=128m
+        -XX:+UseSerialGC
+        -Dlog4j2.formatMsgNoLookups=true
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9083"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - ff-net
+
+  # ==========================================================
+  # HiveServer2 — JDBC / Beeline 入口（端口 10000）
+  # 接收 Spark、beeline 等客户端的 SQL 请求，转发给 metastore
+  # 连接：jdbc:hive2://<host>:10000
+  # ==========================================================
+  hive-server2:
+    image: apache/hive:${HIVE_VERSION:-3.1.3}
+    container_name: ff-hive-server2
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    volumes:
+      - ./config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./config/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
+      - ./init/hive-server2-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    environment:
+      HADOOP_OPTS: >-
+        -Xmx256m -Xms128m
+        -XX:MaxMetaspaceSize=128m
+        -XX:+UseSerialGC
+        -Dlog4j2.formatMsgNoLookups=true
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'org.apache.hive.service.server.HiveServer2' >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - ff-net
+
+  # ==========================================================
+  # Spark Master — Standalone 集群调度（端口 7077 RPC / 8080 WebUI）
+  # 负责资源分配、Worker 管理、接收 spark-submit 任务
+  # WebUI: http://<host>:8080
+  # ==========================================================
+  spark-master:
+    image: bitnami/spark:${SPARK_VERSION:-3.5.1}
+    container_name: ff-spark-master
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    volumes:
+      - ./config/core-site.xml:/opt/bitnami/spark/conf/core-site.xml:ro
+      - ./config/hive-site.xml:/opt/bitnami/spark/conf/hive-site.xml:ro
+      - ./jars:/opt/bitnami/spark/jars-extra:ro
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+      SPARK_DAEMON_MEMORY: 128m
+      SPARK_DAEMON_JAVA_OPTS: >-
+        -XX:MaxMetaspaceSize=128m
+        -XX:+UseSerialGC
+      SPARK_MASTER_HOST: spark-master
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "jps -l | grep -q 'org.apache.spark.deploy.master.Master' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - ff-net
+
+  # ==========================================================
+  # Spark Worker — 计算节点（1 核 / 768m 堆，端口 8081 WebUI）
+  # 执行实际的数据处理和特征工程任务
+  # S3A jar 通过 bind mount ./jars/ 注入
+  # WebUI: http://<host>:8081
+  # ==========================================================
+  spark-worker:
+    image: bitnami/spark:${SPARK_VERSION:-3.5.1}
+    container_name: ff-spark-worker
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./config/core-site.xml:/opt/bitnami/spark/conf/core-site.xml:ro
+      - ./config/hive-site.xml:/opt/bitnami/spark/conf/hive-site.xml:ro
+      - ./jars:/opt/bitnami/spark/jars-extra:ro
+      - spark-work:/opt/bitnami/spark/work
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 768m
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+      SPARK_DAEMON_MEMORY: 128m
+      SPARK_DAEMON_JAVA_OPTS: >-
+        -XX:MaxMetaspaceSize=128m
+        -XX:+UseSerialGC
+      SPARK_EXTRA_CLASSPATH: /opt/bitnami/spark/jars-extra/*
+    mem_limit: 1024m
+    healthcheck:
+      test: ["CMD-SHELL", "jps -l | grep -q 'org.apache.spark.deploy.worker.Worker' || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    restart: unless-stopped
+    networks:
+      - ff-net
+
+# ============================================================
+# 持久化卷
+# ============================================================
+volumes:
+  postgres-data:
+  minio-data:
+  spark-work:
+
+# ============================================================
+# 网络
+# ============================================================
+networks:
+  ff-net:
+    driver: bridge
+    name: feature-factory-net

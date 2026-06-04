@@ -1,0 +1,5 @@
+# 环境变量（含凭据）
+docker/.env
+
+# Maven 依赖 JAR（通过 README 中的 curl 命令下载）
+docker/jars/
