@@ -7,7 +7,7 @@
 #              ├──→ hive-metastore ──→ hive-server2
 #   minio ──┐  │         │
 #           ├──┘         └──→ spark-master ──→ spark-worker
-#   minio-init (一次性，创建 MinIO bucket)
+#   minio-init (一次性，创建 MinIO bucket，创建完成后再启动 hive-metastore，从而实现自动创建minio bucket)
 #
 # JAR 策略：所有 jar 预先下载到 ./jars/ 目录，通过 bind mount 注入
 # Schema 策略：metastore 启动时通过 DataNucleus autoCreateAll 自动建表
@@ -211,7 +211,7 @@ services:
         -XX:MaxMetaspaceSize=128m
         -XX:+UseSerialGC
       SPARK_MASTER_HOST: spark-master
-    mem_limit: 256m
+    mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "jps -l | grep -q 'org.apache.spark.deploy.master.Master' || exit 1"]
       interval: 15s

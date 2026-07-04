@@ -72,13 +72,21 @@ docker compose ps
 
 ## 连接方式
 
-| 组件 | 连接方式 |
-|------|----------|
-| **spark-sql** | `docker exec -it ff-spark-master /opt/bitnami/spark/bin/spark-sql --conf spark.sql.catalogImplementation=hive` |
-| **pyspark** | `docker exec -it ff-spark-master /opt/bitnami/spark/bin/pyspark --conf spark.sql.catalogImplementation=hive` |
-| **Beeline** | `docker exec ff-hive-server2 /opt/hive/bin/beeline -u jdbc:hive2://localhost:10000` |
-| **MinIO Console** | 浏览器访问 `http://<服务器IP>:9001`，账号 `minioadmin` / `minioadmin123` |
-| **Spark WebUI** | `http://<服务器IP>:8080`（Master）/ `:8081`（Worker） |
+Hive 的数据访问链路分为三层，对应三种连接途径：
+
+- **Beeline** — Hive 自带命令行，底层通过 JDBC 协议连接 HiveServer2（端口 10000）
+- **Hive JDBC** — HiveServer2 暴露的标准 JDBC 接口，供 DBeaver / DataGrip 等 GUI 工具直连
+- **PostgreSQL** — Hive Metastore 的底层元数据库（端口 5432），存储所有表结构、分区、列信息
+
+| 组件 | 层级 | 连接方式 |
+|------|------|----------|
+| **spark-sql** | Spark | `docker exec -it ff-spark-master /opt/bitnami/spark/bin/spark-sql --conf spark.sql.catalogImplementation=hive` |
+| **pyspark** | Spark | `docker exec -it ff-spark-master /opt/bitnami/spark/bin/pyspark --conf spark.sql.catalogImplementation=hive` |
+| **Beeline** | Hive（数据访问） | `docker exec ff-hive-server2 /opt/hive/bin/beeline -u jdbc:hive2://localhost:10000` |
+| **Hive JDBC** | Hive（数据访问） | `jdbc:hive2://<服务器IP>:10000`，可用 DBeaver / DataGrip / beeline 连接，默认无认证 |
+| **PostgreSQL** | Hive（元数据） | (psql)`docker exec -it ff-postgres psql -U hive -d hive_metastore`, (宿主机) `psql -h localhost -p 5432 -U hive -d hive_metastore`（密码 `hivepass123`） |
+| **MinIO Console** | 存储 | 浏览器访问 `http://<服务器IP>:9001`，账号 `minioadmin` / `minioadmin123` |
+| **Spark WebUI** | 监控 | `http://<服务器IP>:8080`（Master）/ `:8081`（Worker） |
 
 ## Hive 分层数仓（规划）
 
